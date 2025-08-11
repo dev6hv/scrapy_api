@@ -14,10 +14,15 @@ from scrapy import signals
 logging.getLogger('playwright').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
+# Import the storage from main
+def get_scraped_data_storage():
+    import main
+    return main.scraped_data_storage
+
 class SiteMapScraper(SitemapSpider):
     name = "site_scraper"
     
-    def __init__(self, project_url=None, *args, **kwargs):
+    def __init__(self, project_url=None, crawl_key=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not project_url:
             raise ValueError("Please provide project_url")
@@ -29,7 +34,7 @@ class SiteMapScraper(SitemapSpider):
         self.visited_urls = set()
         self.excluded_urls = set()
         self.path_exclusions = set()
-        self.scraped_data = []  # Store scraped data here
+        self.crawl_key = crawl_key
         
         self.link_extractor = LinkExtractor(
             allow_domains=self.allowed_domains,
@@ -92,11 +97,16 @@ class SiteMapScraper(SitemapSpider):
 
     def handle_error(self, failure):
         self.logger.error(f"Request failed for {failure.request.url}: {str(failure)}")
-        self.scraped_data.append({
+        error_data = {
             "url": failure.request.url,
             "status": "error",
             "error_message": str(failure)
-        })
+        }
+        
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            if self.crawl_key in storage:
+                storage[self.crawl_key].append(error_data)
 
     def parse(self, response):
         current_url = response.url.rstrip('/')
@@ -121,8 +131,12 @@ class SiteMapScraper(SitemapSpider):
             'word_count': len(content_text.split()) if content_text else 0
         }
         
-        self.scraped_data.append(page_data)
-        self.logger.info(f"Added page data for {current_url}: {page_data}")
+        # Store data in shared storage
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            if self.crawl_key in storage:
+                storage[self.crawl_key].append(page_data)
+                self.logger.info(f"Added page data for {current_url}")
 
         links = self.link_extractor.extract_links(response)
         for link in links:
@@ -167,13 +181,15 @@ class SiteMapScraper(SitemapSpider):
             self.logger.warning(f"Sitemap request failed: {response.url}, status: {response.status}")
 
     def closed(self, reason):
-        self.logger.info(f"Spider closed. Scraped data: {len(self.scraped_data)} items")
-        return self.scraped_data
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            data_count = len(storage.get(self.crawl_key, []))
+            self.logger.info(f"Spider closed. Scraped data: {data_count} items")
 
 class WebsiteLinksScraper(Spider):
     name = "website_links_scraper"
     
-    def __init__(self, url=None, *args, **kwargs):
+    def __init__(self, url=None, crawl_key=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not url:
             raise ValueError("Please provide url")
@@ -182,7 +198,7 @@ class WebsiteLinksScraper(Spider):
         self.base_domain = urlparse(url).netloc
         self.allowed_domains = [self.base_domain]
         self.link_extractor = LinkExtractor(canonicalize=True, unique=True)
-        self.scraped_data = []  # Store scraped data here
+        self.crawl_key = crawl_key
         self.logger.info(f"Initialized WebsiteLinksScraper for {url}")
 
     def start_requests(self):
@@ -212,8 +228,13 @@ class WebsiteLinksScraper(Spider):
             'title': response.xpath('//title/text()').get('').strip(),
             'meta_description': response.xpath("//meta[@name='description']/@content").get('').strip()
         }
-        self.scraped_data.append(page_info)
-        self.logger.info(f"Added page info: {page_info}")
+        
+        # Store data in shared storage
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            if self.crawl_key in storage:
+                storage[self.crawl_key].append(page_info)
+                self.logger.info(f"Added page info")
 
         soup = BeautifulSoup(response.text, 'html.parser')
         anchor_tags = soup.find_all('a', href=True)
@@ -254,28 +275,38 @@ class WebsiteLinksScraper(Spider):
                 link_data['link_category'] = 'external'
                 external_links.append(link_data)
             
-            self.scraped_data.append(link_data)
-            self.logger.info(f"Added link: {link_data}")
+            # Store data in shared storage
+            if self.crawl_key:
+                storage = get_scraped_data_storage()
+                if self.crawl_key in storage:
+                    storage[self.crawl_key].append(link_data)
         
         summary = {
             'type': 'summary',
             'total_links': len(anchor_tags),
             'internal_links_count': len(internal_links),
             'external_links_count': len(external_links),
-            'follow_links': len([l for l in self.scraped_data if l.get('link_type') == 'follow']),
-            'nofollow_links': len([l for l in self.scraped_data if l.get('link_type') == 'nofollow'])
+            'follow_links': len([l for l in internal_links + external_links if l.get('link_type') == 'follow']),
+            'nofollow_links': len([l for l in internal_links + external_links if l.get('link_type') == 'nofollow'])
         }
-        self.scraped_data.append(summary)
-        self.logger.info(f"Added summary: {summary}")
+        
+        # Store summary in shared storage
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            if self.crawl_key in storage:
+                storage[self.crawl_key].append(summary)
+                self.logger.info(f"Added summary")
 
     def closed(self, reason):
-        self.logger.info(f"Spider closed. Scraped data: {len(self.scraped_data)} items")
-        return self.scraped_data
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            data_count = len(storage.get(self.crawl_key, []))
+            self.logger.info(f"Spider closed. Scraped data: {data_count} items")
 
 class ContactScraper(Spider):
     name = "contact_scraper"
 
-    def __init__(self, url=None, *args, **kwargs):
+    def __init__(self, url=None, crawl_key=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not url:
             raise ValueError("Please provide url")
@@ -283,8 +314,8 @@ class ContactScraper(Spider):
         self.url = url.rstrip('/')
         self.base_domain = urlparse(url).netloc
         self.allowed_domains = [self.base_domain]
-        self.scraped_data = []  # Store scraped data here
         self.visited_urls = set([self.url])
+        self.crawl_key = crawl_key
 
         self.contact_keywords = [
             'contact', 'contactus', 'contact-us', 'about', 'aboutus', 'about-us',
@@ -307,7 +338,7 @@ class ContactScraper(Spider):
         self.logger.info(f"Parsing initial URL: {current_url}")
 
         # Process the initial page
-        yield from self.parse_page(response)
+        self.parse_page(response)
 
         # Find and follow contact pages
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -339,25 +370,26 @@ class ContactScraper(Spider):
                 'status': 'error',
                 'error_message': f"Non-200 status code: {response.status}"
             }
-            self.scraped_data.append(contact_data)
-            return contact_data
+        else:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            emails = self.extract_emails(soup)
+            phones = self.extract_phone_numbers(soup)
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        emails = self.extract_emails(soup)
-        phones = self.extract_phone_numbers(soup)
+            contact_data = {
+                'type': 'contact_info',
+                'url': self.url,
+                'emails': list(set(emails)),
+                'phone_numbers': list(set(phones)),
+                'found_on_page': current_url,
+                'status': 'found' if emails or phones else 'not_found'
+            }
 
-        contact_data = {
-            'type': 'contact_info',
-            'url': self.url,
-            'emails': list(set(emails)),
-            'phone_numbers': list(set(phones)),
-            'found_on_page': current_url,
-            'status': 'found' if emails or phones else 'not_found'
-        }
-
-        self.scraped_data.append(contact_data)
-        self.logger.info(f"Appended contact data for {current_url}: {contact_data}")
-        return contact_data
+        # Store data in shared storage
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            if self.crawl_key in storage:
+                storage[self.crawl_key].append(contact_data)
+                self.logger.info(f"Appended contact data for {current_url}")
 
     def extract_emails(self, soup):
         text = soup.get_text()
@@ -401,9 +433,15 @@ class ContactScraper(Spider):
             'status': 'error',
             'error_message': str(failure)
         }
-        self.scraped_data.append(contact_data)
-        return contact_data
+        
+        # Store error data in shared storage
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            if self.crawl_key in storage:
+                storage[self.crawl_key].append(contact_data)
 
     def closed(self, reason):
-        self.logger.info(f"Spider closed. Scraped data: {len(self.scraped_data)} items")
-        return self.scraped_data
+        if self.crawl_key:
+            storage = get_scraped_data_storage()
+            data_count = len(storage.get(self.crawl_key, []))
+            self.logger.info(f"Spider closed. Scraped data: {data_count} items")

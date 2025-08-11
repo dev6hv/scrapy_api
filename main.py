@@ -36,7 +36,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-@wait_for(timeout=180.0)
+# Global variable to store scraped data
+scraped_data_storage = {}
+
+@wait_for(timeout=360.0)
 @inlineCallbacks
 def run_spider(spider_class, **kwargs):
     settings = get_project_settings()
@@ -57,7 +60,24 @@ def run_spider(spider_class, **kwargs):
     settings.set('USER_AGENT', 'Mozilla/5.0 (compatible; ScrapyBot/1.0; +http://www.yourdomain.com/bot)')
 
     runner = CrawlerRunner(settings)
-    result = yield runner.crawl(spider_class, **kwargs)
+    
+    # Generate a unique key for this crawl
+    crawl_key = f"{spider_class.name}_{hash(str(kwargs))}"
+    scraped_data_storage[crawl_key] = []
+    
+    # Pass the crawl_key to spider so it can store data there
+    kwargs['crawl_key'] = crawl_key
+    
+    # Crawl with the spider class and kwargs
+    deferred = runner.crawl(spider_class, **kwargs)
+    yield deferred
+    
+    # Return the scraped data from storage
+    result = scraped_data_storage.get(crawl_key, [])
+    # Clean up storage
+    if crawl_key in scraped_data_storage:
+        del scraped_data_storage[crawl_key]
+    
     returnValue(result)
 
 @app.get("/")
@@ -73,13 +93,13 @@ def root():
     }
 
 @app.get("/sitemap")
-def run_sitemap_scraper(project_url: str = Query(...)):
+def run_sitemap_scraper(url: str = Query(...)):
     try:
-        if not project_url.startswith(('http://', 'https://')):
-            project_url = 'https://' + project_url
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
 
-        logger.info(f"Starting sitemap scraper for {project_url}")
-        result = run_spider(SiteMapScraper, project_url=project_url)
+        logger.info(f"Starting sitemap scraper for {url}")
+        result = run_spider(SiteMapScraper, project_url=url)
 
         if not result:
             raise HTTPException(status_code=500, detail="No data returned")
@@ -87,7 +107,7 @@ def run_sitemap_scraper(project_url: str = Query(...)):
         return JSONResponse(content={
             "status": "success",
             "scraper_type": "sitemap",
-            "target_url": project_url,
+            "target_url": url,
             "pages_found": len(result),
             "data": result
         })
@@ -95,6 +115,7 @@ def run_sitemap_scraper(project_url: str = Query(...)):
     except Exception as e:
         logger.error(f"Sitemap scraper error: {str(e)}")
         return JSONResponse(content={"status": "error", "error_message": str(e)}, status_code=500)
+
 
 @app.get("/links")
 def run_links_scraper(url: str = Query(...)):
