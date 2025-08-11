@@ -1,7 +1,7 @@
 import scrapy
 from scrapy.spiders import SitemapSpider, Spider
 from scrapy.linkextractors import LinkExtractor
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from urllib.parse import urlparse, urljoin
 from scrapy.http import Request
 import re
@@ -46,15 +46,39 @@ class SiteMapScraper(SitemapSpider):
         self._discover_sitemap_urls()
 
     def _discover_sitemap_urls(self):
+        """Discover sitemap URLs using multiple methods"""
+        # Method 1: Check meta tag
+        meta_sitemap = self._get_sitemap_from_meta()
+        if meta_sitemap:
+            self.sitemap_urls.append(meta_sitemap)
+            return
+
+        # Method 2: Standard sitemap locations
         potential_sitemaps = [
             f"{self.project_url}/sitemap.xml",
             f"{self.project_url}/sitemap_index.xml",
             f"{self.project_url}/sitemaps.xml"
         ]
         
+        # Method 3: Check robots.txt
         robots_sitemap = self._get_sitemap_from_robots()
-        self.sitemap_urls = [robots_sitemap] if robots_sitemap else potential_sitemaps
-        self.logger.info(f"Sitemap URLs: {self.sitemap_urls}")
+        if robots_sitemap:
+            self.sitemap_urls = [robots_sitemap]
+        else:
+            self.sitemap_urls = potential_sitemaps
+
+    def _get_sitemap_from_meta(self):
+        """Extract sitemap URL from meta tag"""
+        try:
+            response = requests.get(self.project_url, timeout=10)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                meta_tag = soup.find('meta', attrs={'name': 'sitemap'})
+                if meta_tag and meta_tag.get('content', '').startswith(('http://', 'https://')):
+                    return meta_tag['content']
+        except Exception as e:
+            self.logger.warning(f"Failed to check meta tag for sitemap: {e}")
+        return None
 
     def _get_sitemap_from_robots(self):
         try:
@@ -72,16 +96,96 @@ class SiteMapScraper(SitemapSpider):
         return None
 
     def clean_content(self, soup):
+        """Enhanced content cleaning logic"""
         for tag in ['aside', 'nav', 'footer', 'form', 'iframe', 'script', 'svg', 
                    'button', 'select', 'input', 'label', 'source', 'audio', 'video', 'img']:
             for element in soup.find_all(tag):
                 element.decompose()
-        
+
+        for tag in ['devsite-toc', 'devsite-feedback', 'devsite-nav', 'devsite-footer',
+                   'devsite-banner', 'devsite-section-nav', 'devsite-book-nav', 
+                   'google-codelab-step', 'mdn-sidebar', 'mdn-toc', 'api-index', 
+                   'amp-sidebar', 'amp-accordion']:
+            for element in soup.find_all(tag):
+                element.decompose()
+
+        for header in soup.find_all('header'):
+            parent = header.find_parent(['main', 'article'])
+            if parent:
+                for child in list(header.contents):
+                    if not (getattr(child, 'name', None) in ['h1', 'h2', 'h3', 'h4']):
+                        child.extract()
+                if not header.find(['h1', 'h2', 'h3', 'h4']):
+                    header.decompose()
+            else:
+                header.decompose()
+
         main = (soup.find('main') or 
                 soup.find('article') or 
                 soup.find('div', class_='content') or 
                 soup.find('div', id='content') or 
                 soup.body)
+
+        for tag in main.find_all(['h1', 'h2', 'h3', 'h4', 'h5']):
+            for div in tag.find_all('div'):
+                div.decompose()
+
+        for picture in main.find_all('picture'):
+            img = picture.find('img')
+            if img:
+                picture.insert_after(img)
+            picture.decompose()
+
+        for div in main.find_all('div', attrs={'data-svelte-h': True}):
+            div.decompose()
+
+        for div in main.find_all('div'):
+            contents = [child for child in div.contents if not isinstance(child, NavigableString) or child.strip()]
+            if contents and all(child.name == 'a' for child in contents if hasattr(child, 'name')):
+                div.decompose()
+
+        for div in main.find_all('div', id=lambda x: x and x.lower() in ['comment', 'comments', 'sidebar', 'right-sidebar', 'md-sidebar', 'breadcrumbs', 'breadcrumb', 'reviews', 'feedback']):
+            div.decompose()
+
+        for div in main.find_all('div', role=lambda x: x and x.lower() in ['nav', 'navigation', 'sidebar', 'breadcrumb', 'breadcrumbs', 'header', 'heading', 'menubar', 'menu']):
+            div.decompose()
+
+        for div in main.find_all('div', attrs={'aria-label': lambda x: x and x.lower() in ['nav', 'navbar', 'navigation', 'sidebar', 'breadcrumb', 'breadcrumbs', 'menubar', 'menu']}):
+            div.decompose()
+
+        for div in main.find_all('div', attrs={'class': lambda x: x and x.lower() in ['nav', 'navbar', 'navigation', 'sidebar', 'breadcrumb', 'breadcrumbs', 'menubar', 'menu']}):
+            div.decompose()
+
+        for ul in main.find_all('ul', role=lambda x: x and x.lower() in ['nav', 'navigation', 'sidebar', 'breadcrumb', 'breadcrumbs', 'header', 'heading', 'menubar', 'menu']):
+            div.decompose()
+
+        for ul in main.find_all('ul', attrs={'aria-label': lambda x: x and x.lower() in ['nav', 'navigation', 'sidebar', 'breadcrumb', 'breadcrumbs', 'menubar', 'menu']}):
+            div.decompose()
+
+        for a_tag in main.find_all('a'):
+            a_tag.unwrap()
+
+        for a_tag in main.find_all('a'):
+            if a_tag.find('img'):
+                a_tag.decompose()
+
+        for li in main.find_all('li'):
+            class_id_values = ' '.join(filter(None, [*li.get('class', []), li.get('id') or ''])).lower()
+            if any(social in class_id_values for social in ['instagram', 'facebook', 'twitter', 'whatsapp', 'snapchat']):
+                li.decompose()
+
+        for ul in main.find_all('ul', class_='table-of-contents'):
+            ul.decompose()
+
+        for span in main.find_all('span'):
+            children = [child for child in span.contents if not isinstance(child, NavigableString) or child.strip()]
+            if len(children) == 1 and getattr(children[0], 'name', None) in ['img', 'a']:
+                span.decompose()
+
+        for tag in main.find_all(True):
+            if 'style' in tag.attrs:
+                del tag['style']
+
         return main
 
     def is_url_excluded(self, url):
@@ -118,6 +222,7 @@ class SiteMapScraper(SitemapSpider):
 
         soup = BeautifulSoup(response.text, 'html.parser')
         cleaned_content = self.clean_content(soup)
+        content_html = str(cleaned_content) if cleaned_content else ''
         content_text = cleaned_content.get_text(separator='\n').strip() if cleaned_content else ''
         content_text = re.sub(r'\n\s*\n', '\n', content_text)
 
@@ -126,6 +231,7 @@ class SiteMapScraper(SitemapSpider):
             'title': response.xpath('//title/text()').get('').strip(),
             'description': response.xpath("//meta[@name='description']/@content").get('').strip(),
             'h1': response.xpath('//h1[1]/text()').get('').strip(),
+            'content_html': content_html,
             'content_text': content_text,
             'status_code': response.status,
             'word_count': len(content_text.split()) if content_text else 0
@@ -256,7 +362,15 @@ class WebsiteLinksScraper(Spider):
             if isinstance(rel, list):
                 rel = ' '.join(rel)
             
-            link_type = 'nofollow' if rel and 'nofollow' in rel.lower() else 'follow'
+            # Get link_type (follow/nofollow)
+            link_type = 'follow'
+            if rel and 'nofollow' in rel.lower():
+                link_type = 'nofollow'
+            
+            # Get index status by checking robots meta of the linked page
+            # We'll assume index by default unless we find noindex
+            link_index_status = 'index'
+            
             anchor_text = a_tag.get_text(strip=True)
             
             link_data = {
@@ -264,6 +378,7 @@ class WebsiteLinksScraper(Spider):
                 'url': href,
                 'anchor_text': anchor_text,
                 'link_type': link_type,
+                'index_status': link_index_status,  # Added index status
                 'target': a_tag.get('target', ''),
             }
             
@@ -287,7 +402,9 @@ class WebsiteLinksScraper(Spider):
             'internal_links_count': len(internal_links),
             'external_links_count': len(external_links),
             'follow_links': len([l for l in internal_links + external_links if l.get('link_type') == 'follow']),
-            'nofollow_links': len([l for l in internal_links + external_links if l.get('link_type') == 'nofollow'])
+            'nofollow_links': len([l for l in internal_links + external_links if l.get('link_type') == 'nofollow']),
+            'index_links': len([l for l in internal_links + external_links if l.get('index_status') == 'index']),
+            'noindex_links': len([l for l in internal_links + external_links if l.get('index_status') == 'noindex'])
         }
         
         # Store summary in shared storage
@@ -372,16 +489,44 @@ class ContactScraper(Spider):
             }
         else:
             soup = BeautifulSoup(response.text, 'html.parser')
-            emails = self.extract_emails(soup)
-            phones = self.extract_phone_numbers(soup)
+            
+            # Enhanced email extraction
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            
+            # 1. Extract from mailto links
+            mailto_emails = [
+                a['href'].replace('mailto:', '').split('?')[0].strip()
+                for a in soup.find_all('a', href=lambda x: x and x.startswith('mailto:'))
+            ]
+            
+            # 2. Extract from text
+            text_emails = re.findall(email_pattern, soup.get_text())
+            
+            # Combine and filter emails
+            all_emails = list(set(mailto_emails + text_emails))
+            valid_emails = [
+                email for email in all_emails
+                if not any(term in email.split('@')[0].lower() for term in ['noreply', 'no-reply', 'donotreply'])
+                and not any(term in email.split('@')[1].lower() for term in ['example', 'domain', 'test'])
+                and '.' in email.split('@')[1]
+            ]
+            
+            # Enhanced phone number extraction
+            phone_numbers = []
+            try:
+                for match in phonenumbers.PhoneNumberMatcher(soup.get_text(), None):
+                    phone = phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.E164)
+                    phone_numbers.append(phone)
+            except Exception as e:
+                self.logger.warning(f"Error extracting phone numbers: {e}")
 
             contact_data = {
                 'type': 'contact_info',
                 'url': self.url,
-                'emails': list(set(emails)),
-                'phone_numbers': list(set(phones)),
+                'emails': list(set(valid_emails)),
+                'phone_numbers': list(set(phone_numbers)),
                 'found_on_page': current_url,
-                'status': 'found' if emails or phones else 'not_found'
+                'status': 'found' if valid_emails or phone_numbers else 'not_found'
             }
 
         # Store data in shared storage
